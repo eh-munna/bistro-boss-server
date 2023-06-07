@@ -1,5 +1,6 @@
 const express = require('express');
 const app = express();
+const jwt = require('jsonwebtoken');
 const port = process.env.PORT || 5000;
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
@@ -12,6 +13,24 @@ const cors = require('cors');
 // middleware
 app.use(express.json());
 app.use(cors());
+
+const verifyJWT = (req, res, next) => {
+  const authorization = req.headers.authorization;
+  if (!authorization) {
+    return res.status(401).send({ error: true, message: 'Invalid access' });
+  }
+  const token = authorization.split(' ')[1];
+
+  jwt.verify(token, process.env.ACCESS_TOKEN, (err, decoded) => {
+    if (err) {
+      return res
+        .status(401)
+        .send({ error: true, message: 'Token verification failed' });
+    }
+    req.decoded = decoded;
+    next();
+  });
+};
 
 // database configuration
 
@@ -40,7 +59,43 @@ async function run() {
     const cartCollection = database.collection('cartCollection');
     const userCollection = database.collection('userCollection');
 
+    app.post('/jwt', (req, res) => {
+      const user = req.body;
+      const token = jwt.sign(user, process.env.ACCESS_TOKEN, {
+        expiresIn: '1h',
+      });
+      res.send({ token });
+    });
+
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email: email };
+      const user = await userCollection.findOne(query);
+      if (user?.role !== 'admin') {
+        return res.status(403).send({ error: true, message: 'Invalid access' });
+      }
+      next();
+    };
+
     // user collection
+
+    // get users
+    app.get('/users', verifyJWT, verifyAdmin, async (req, res) => {
+      const result = await userCollection.find().toArray();
+      res.send(result);
+    });
+
+    // get admin base on email
+    app.get('/users/admin/:email', verifyJWT, async (req, res) => {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
+        return res.send({ admin: false });
+      }
+      const query = { email: email };
+      const user = await userCollection.findOne(query);
+      const result = { admin: user?.role === 'admin' };
+      res.send(result);
+    });
 
     app.post('/users', async (req, res) => {
       const user = req.body;
@@ -50,6 +105,18 @@ async function run() {
         return res.send({ message: 'User already exists' });
       }
       const result = await userCollection.insertOne(user);
+      res.send(result);
+    });
+
+    app.patch('/users/admin/:id', async (req, res) => {
+      const id = req.params.id;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          role: 'admin',
+        },
+      };
+      const result = await userCollection.updateOne(filter, updateDoc);
       res.send(result);
     });
 
@@ -67,15 +134,23 @@ async function run() {
     });
 
     // cart collection
-    app.get('/carts', async (req, res) => {
+    app.get('/carts', verifyJWT, async (req, res) => {
       const email = req.query.email;
       if (!email) {
         res.send([]);
       }
+
+      const decodedEmail = req.decoded.email;
+      if (email !== decodedEmail) {
+        return res.status(401).send({ error: true, message: 'Invalid access' });
+      }
+
       const query = { email: email };
       const result = await cartCollection.find(query).toArray();
       res.send(result);
     });
+
+    // sending tokens
 
     // inset the order items in the db
 
